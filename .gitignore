@@ -109,3 +109,13 @@ dmypy.json
 
 # VS Code
 .vscode/
+.vercel
+
+__pycache__/
+*.pyc
+venv/
+ocr/
+.env
+.vercel
+captured_images/
+node_modules/

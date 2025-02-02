@@ -10,9 +10,9 @@ import os
 import base64
 from io import BytesIO
 from datetime import datetime
-import win32print
-import win32ui
-import win32con
+# import win32print
+# import win32ui
+# import win32con
 
 app = FastAPI()
 
@@ -246,7 +246,7 @@ async def get_images():
 async def startup_event():
     """Create necessary directories on startup"""
     os.makedirs("captured_images", exist_ok=True)
-    print(f"Using printer: {win32print.GetDefaultPrinter()}")
+    # print(f"Using printer: {win32print.GetDefaultPrinter()}")
 
 @app.on_event("shutdown")
 async def shutdown_event():
