@@ -13,10 +13,10 @@ import platform
 app = FastAPI()
 
 # Enable CORS with environment-based origin
-FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:5173")
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://photo-booth-seven-murex.vercel.app")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL],
+    allow_origins=[FRONTEND_URL, "http://localhost:5173"],  # Allow both production and development URLs
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
