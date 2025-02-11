@@ -3,25 +3,87 @@ from fastapi.middleware.cors import CORSMiddleware
 import cv2
 import mediapipe as mp
 import time
-from PIL import Image, ImageWin
+from PIL import Image
 import os
 import base64
 from io import BytesIO
 from datetime import datetime
-import win32print
-import win32ui
-import win32con
+import platform
 
 app = FastAPI()
 
-# Enable CORS
+# Enable CORS with environment-based origin
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:5173")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # React dev server
+    allow_origins=[FRONTEND_URL],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Platform-specific imports
+IS_WINDOWS = platform.system() == "Windows"
+if IS_WINDOWS:
+    import win32print
+    import win32ui
+    import win32con
+    from PIL import ImageWin
+
+class PrinterService:
+    @staticmethod
+    def print_image(image_path):
+        """Platform-independent print function"""
+        try:
+            if not IS_WINDOWS:
+                print(f"Printing not supported on this platform. Image saved at: {image_path}")
+                return True
+
+            # Windows-specific printing
+            image = Image.open(image_path)
+            printer_name = win32print.GetDefaultPrinter()
+            hprinter = win32print.OpenPrinter(printer_name)
+            hdc = win32ui.CreateDC()
+            hdc.CreatePrinterDC(printer_name)
+
+            printer_info = win32print.GetPrinter(hprinter, 2)
+            devmode = printer_info['pDevMode']
+            devmode.BitsPerPel = 24
+            devmode.PelsWidth = image.size[0]
+            devmode.PelsHeight = image.size[1]
+            devmode.Orientation = 1
+
+            hdc.StartDoc('Photo Booth Image')
+            hdc.StartPage()
+            dib = ImageWin.Dib(image)
+
+            printer_width = hdc.GetDeviceCaps(win32con.PHYSICALWIDTH)
+            printer_height = hdc.GetDeviceCaps(win32con.PHYSICALHEIGHT)
+
+            image_ratio = image.size[0] / image.size[1]
+            printer_ratio = printer_width / printer_height
+
+            if image_ratio > printer_ratio:
+                scaled_width = printer_width
+                scaled_height = int(printer_width / image_ratio)
+            else:
+                scaled_height = printer_height
+                scaled_width = int(printer_height * image_ratio)
+
+            x = int((printer_width - scaled_width) / 2)
+            y = int((printer_height - scaled_height) / 2)
+
+            dib.draw(hdc.GetHandleOutput(), (x, y, x + scaled_width, y + scaled_height))
+
+            hdc.EndPage()
+            hdc.EndDoc()
+            hdc.DeleteDC()
+            win32print.ClosePrinter(hprinter)
+
+            return True
+        except Exception as e:
+            print(f"Printing error: {e}")
+            return False
 
 # Ensure captured_images directory exists
 os.makedirs("captured_images", exist_ok=True)
@@ -33,7 +95,7 @@ capture_session = {
     "status": "",
     "wave_detected": False,
     "countdown_start": 0,
-    "frame": None  # Store the latest frame
+    "frame": None
 }
 
 # Initialize MediaPipe
@@ -47,72 +109,6 @@ hands = mp_hands.Hands(
 # Initialize camera
 cap = None
 
-def print_image(image_path):
-    """Print image directly to default printer"""
-    try:
-        # Open image
-        image = Image.open(image_path)
-
-        # Get default printer
-        printer_name = win32print.GetDefaultPrinter()
-
-        # Open printer
-        hprinter = win32print.OpenPrinter(printer_name)
-
-        # Create device context
-        hdc = win32ui.CreateDC()
-        hdc.CreatePrinterDC(printer_name)
-
-        # Configure printer settings
-        printer_info = win32print.GetPrinter(hprinter, 2)
-        devmode = printer_info['pDevMode']
-        devmode.BitsPerPel = 24  # Color printing
-        devmode.PelsWidth = image.size[0]
-        devmode.PelsHeight = image.size[1]
-        devmode.Orientation = 1  # Portrait
-
-        # Start print job
-        hdc.StartDoc('Photo Booth Image')
-        hdc.StartPage()
-
-        # Convert image to Windows-compatible DIB
-        dib = ImageWin.Dib(image)
-
-        # Get printer dimensions
-        printer_width = hdc.GetDeviceCaps(win32con.PHYSICALWIDTH)
-        printer_height = hdc.GetDeviceCaps(win32con.PHYSICALHEIGHT)
-
-        # Scale image to fit printer page while maintaining aspect ratio
-        image_ratio = image.size[0] / image.size[1]
-        printer_ratio = printer_width / printer_height
-
-        if image_ratio > printer_ratio:
-            scaled_width = printer_width
-            scaled_height = int(printer_width / image_ratio)
-        else:
-            scaled_height = printer_height
-            scaled_width = int(printer_height * image_ratio)
-
-        # Center the image on the page
-        x = int((printer_width - scaled_width) / 2)
-        y = int((printer_height - scaled_height) / 2)
-
-        # Print the image
-        dib.draw(hdc.GetHandleOutput(), (x, y, x + scaled_width, y + scaled_height))
-
-        # End print job
-        hdc.EndPage()
-        hdc.EndDoc()
-
-        # Clean up
-        hdc.DeleteDC()
-        win32print.ClosePrinter(hprinter)
-
-        return True
-    except Exception as e:
-        print(f"Printing error: {e}")
-        return False
-
 def get_frame_base64():
     """Convert the current frame to base64"""
     if capture_session["frame"] is None:
@@ -123,7 +119,6 @@ def get_frame_base64():
 @app.post("/start-capture")
 async def start_capture():
     global cap, capture_session
-
     if capture_session["active"]:
         raise HTTPException(status_code=400, detail="Capture session already active")
 
@@ -132,14 +127,14 @@ async def start_capture():
         if not cap.isOpened():
             raise Exception("Could not open camera")
 
-        capture_session = {
+        capture_session.update({
             "active": True,
             "countdown": None,
             "status": "Waiting for wave gesture...",
             "wave_detected": False,
             "countdown_start": 0,
             "frame": None
-        }
+        })
         return {"status": "Capture session started"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -147,7 +142,6 @@ async def start_capture():
 @app.post("/stop-capture")
 async def stop_capture():
     global cap, capture_session
-
     if not capture_session["active"]:
         raise HTTPException(status_code=400, detail="No active capture session to stop")
 
@@ -177,7 +171,7 @@ async def get_capture_status():
             raise Exception("Failed to grab frame")
 
         frame = cv2.flip(frame, 1)
-        capture_session["frame"] = frame  # Store the frame
+        capture_session["frame"] = frame
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = hands.process(rgb_frame)
 
@@ -199,18 +193,15 @@ async def get_capture_status():
             capture_session["countdown"] = remaining
 
             if remaining == 0:
-                # Save image
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 filename = f"captured_images/photo_{timestamp}.jpg"
                 cv2.imwrite(filename, frame)
 
-                # Print the image
-                if print_image(filename):
+                if PrinterService.print_image(filename):
                     capture_session["status"] = "Image captured and printed!"
                 else:
                     capture_session["status"] = "Image captured but printing failed"
 
-                # Reset the wave detection for continuous capture
                 capture_session["wave_detected"] = False
                 capture_session["countdown"] = None
                 capture_session["status"] = "Waiting for wave gesture..."
@@ -254,7 +245,6 @@ async def get_images():
 async def startup_event():
     """Create necessary directories on startup"""
     os.makedirs("captured_images", exist_ok=True)
-    # print(f"Using printer: {win32print.GetDefaultPrinter()}")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -262,3 +252,8 @@ async def shutdown_event():
     global cap
     if cap and cap.isOpened():
         cap.release()
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
