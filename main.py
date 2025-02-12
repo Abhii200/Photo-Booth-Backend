@@ -12,78 +12,15 @@ import platform
 
 app = FastAPI()
 
-# Enable CORS with environment-based origin
+# Enable CORS
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://photo-booth-seven-murex.vercel.app")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL, "http://localhost:5173"],  # Allow both production and development URLs
+    allow_origins=[FRONTEND_URL, "http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Platform-specific imports
-IS_WINDOWS = platform.system() == "Windows"
-if IS_WINDOWS:
-    import win32print
-    import win32ui
-    import win32con
-    from PIL import ImageWin
-
-class PrinterService:
-    @staticmethod
-    def print_image(image_path):
-        """Platform-independent print function"""
-        try:
-            if not IS_WINDOWS:
-                print(f"Printing not supported on this platform. Image saved at: {image_path}")
-                return True
-
-            # Windows-specific printing
-            image = Image.open(image_path)
-            printer_name = win32print.GetDefaultPrinter()
-            hprinter = win32print.OpenPrinter(printer_name)
-            hdc = win32ui.CreateDC()
-            hdc.CreatePrinterDC(printer_name)
-
-            printer_info = win32print.GetPrinter(hprinter, 2)
-            devmode = printer_info['pDevMode']
-            devmode.BitsPerPel = 24
-            devmode.PelsWidth = image.size[0]
-            devmode.PelsHeight = image.size[1]
-            devmode.Orientation = 1
-
-            hdc.StartDoc('Photo Booth Image')
-            hdc.StartPage()
-            dib = ImageWin.Dib(image)
-
-            printer_width = hdc.GetDeviceCaps(win32con.PHYSICALWIDTH)
-            printer_height = hdc.GetDeviceCaps(win32con.PHYSICALHEIGHT)
-
-            image_ratio = image.size[0] / image.size[1]
-            printer_ratio = printer_width / printer_height
-
-            if image_ratio > printer_ratio:
-                scaled_width = printer_width
-                scaled_height = int(printer_width / image_ratio)
-            else:
-                scaled_height = printer_height
-                scaled_width = int(printer_height * image_ratio)
-
-            x = int((printer_width - scaled_width) / 2)
-            y = int((printer_height - scaled_height) / 2)
-
-            dib.draw(hdc.GetHandleOutput(), (x, y, x + scaled_width, y + scaled_height))
-
-            hdc.EndPage()
-            hdc.EndDoc()
-            hdc.DeleteDC()
-            win32print.ClosePrinter(hprinter)
-
-            return True
-        except Exception as e:
-            print(f"Printing error: {e}")
-            return False
 
 # Ensure captured_images directory exists
 os.makedirs("captured_images", exist_ok=True)
@@ -95,7 +32,9 @@ capture_session = {
     "status": "",
     "wave_detected": False,
     "countdown_start": 0,
-    "frame": None
+    "frame": None,
+    "pending_image": None,
+    "pending_image_path": None
 }
 
 # Initialize MediaPipe
@@ -116,6 +55,60 @@ def get_frame_base64():
     _, buffer = cv2.imencode('.jpg', capture_session["frame"])
     return base64.b64encode(buffer).decode('utf-8')
 
+@app.post("/approve-image")
+async def approve_image(data: dict):
+    """Handle image approval or rejection"""
+    try:
+        approved = data.get("approved", False)
+        
+        if capture_session["pending_image_path"] is None:
+            raise HTTPException(status_code=400, detail="No pending image")
+
+        if approved:
+            # Image is already saved, just need to handle printing if available
+            if platform.system() == "Windows":
+                try:
+                    # Add your printing logic here if needed
+                    pass
+                except Exception as e:
+                    print(f"Printing error: {e}")
+        else:
+            # Delete the rejected image
+            if os.path.exists(capture_session["pending_image_path"]):
+                os.remove(capture_session["pending_image_path"])
+
+        # Reset pending image state
+        capture_session["pending_image"] = None
+        capture_session["pending_image_path"] = None
+        capture_session["wave_detected"] = False
+        capture_session["status"] = "Waiting for wave gesture..."
+
+        return {"status": "Image processed successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/images")
+async def get_images():
+    """Get all captured images"""
+    try:
+        images = []
+        if not os.path.exists("captured_images"):
+            return images
+
+        for filename in os.listdir("captured_images"):
+            if filename.endswith((".jpg", ".jpeg", ".png")):
+                with open(os.path.join("captured_images", filename), "rb") as image_file:
+                    image_data = base64.b64encode(image_file.read()).decode()
+                    timestamp = filename.split("_")[1].split(".")[0]
+                    images.append({
+                        "id": filename,
+                        "url": f"data:image/jpeg;base64,{image_data}",
+                        "timestamp": timestamp
+                    })
+        return sorted(images, key=lambda x: x["timestamp"], reverse=True)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/start-capture")
 async def start_capture():
     global cap, capture_session
@@ -133,7 +126,9 @@ async def start_capture():
             "status": "Waiting for wave gesture...",
             "wave_detected": False,
             "countdown_start": 0,
-            "frame": None
+            "frame": None,
+            "pending_image": None,
+            "pending_image_path": None
         })
         return {"status": "Capture session started"}
     except Exception as e:
@@ -143,7 +138,7 @@ async def start_capture():
 async def stop_capture():
     global cap, capture_session
     if not capture_session["active"]:
-        raise HTTPException(status_code=400, detail="No active capture session to stop")
+        raise HTTPException(status_code=400, detail="No active capture session")
 
     try:
         capture_session["active"] = False
@@ -166,6 +161,16 @@ async def get_capture_status():
         }
 
     try:
+        # If there's a pending image, return it without capturing new frames
+        if capture_session["pending_image"]:
+            return {
+                "active": True,
+                "countdown": None,
+                "status": "Please confirm or reject the photo",
+                "frame": None,
+                "pendingImage": capture_session["pending_image"]
+            }
+
         ret, frame = cap.read()
         if not ret:
             raise Exception("Failed to grab frame")
@@ -194,17 +199,30 @@ async def get_capture_status():
 
             if remaining == 0:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"captured_images/photo_{timestamp}.jpg"
-                cv2.imwrite(filename, frame)
+                filename = f"photo_{timestamp}.jpg"
+                filepath = os.path.join("captured_images", filename)
+                cv2.imwrite(filepath, frame)
 
-                if PrinterService.print_image(filename):
-                    capture_session["status"] = "Image captured and printed!"
-                else:
-                    capture_session["status"] = "Image captured but printing failed"
-
-                capture_session["wave_detected"] = False
+                # Create the pending image data
+                with open(filepath, "rb") as image_file:
+                    image_data = base64.b64encode(image_file.read()).decode()
+                
+                capture_session["pending_image"] = {
+                    "id": filename,
+                    "url": f"data:image/jpeg;base64,{image_data}",
+                    "timestamp": timestamp
+                }
+                capture_session["pending_image_path"] = filepath
+                capture_session["status"] = "Photo taken! Please confirm or reject."
                 capture_session["countdown"] = None
-                capture_session["status"] = "Waiting for wave gesture..."
+                
+                return {
+                    "active": True,
+                    "countdown": None,
+                    "status": "Photo taken! Please confirm or reject.",
+                    "frame": None,
+                    "pendingImage": capture_session["pending_image"]
+                }
 
         return {
             "active": True,
@@ -217,28 +235,6 @@ async def get_capture_status():
         capture_session["active"] = False
         if cap:
             cap.release()
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/images")
-async def get_images():
-    """Get all captured images"""
-    try:
-        images = []
-        if not os.path.exists("captured_images"):
-            return images
-
-        for filename in os.listdir("captured_images"):
-            if filename.endswith((".jpg", ".jpeg", ".png")):
-                with open(os.path.join("captured_images", filename), "rb") as image_file:
-                    image_data = base64.b64encode(image_file.read()).decode()
-                    timestamp = filename.split("_")[1].split(".")[0]
-                    images.append({
-                        "id": filename,
-                        "url": f"data:image/jpeg;base64,{image_data}",
-                        "timestamp": timestamp
-                    })
-        return images
-    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.on_event("startup")
